@@ -1,0 +1,71 @@
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"strings"
+
+	"github.com/marksamman/bencode"
+)
+
+func parseTorrent(meta []byte, infohashHex string) (*torrent, error) {
+	dict, err := bencode.Decode(bytes.NewBuffer(meta))
+	if err != nil {
+		return nil, err
+	}
+
+	t := &torrent{
+        infohashHex: infohashHex,
+        info:        meta, // 保存原始数据
+    }
+	if name, ok := dict["name.utf-8"].(string); ok {
+		t.name = name
+	} else if name, ok := dict["name"].(string); ok {
+		t.name = name
+	}
+	if length, ok := dict["length"].(int64); ok {
+		t.length = length
+	}
+
+	var totalSize int64
+	var extractFiles = func(file map[string]interface{}) {
+		var filename string
+		var filelength int64
+		if inter, ok := file["path.utf-8"].([]interface{}); ok {
+			name := make([]string, len(inter))
+			for i, v := range inter {
+				name[i] = fmt.Sprint(v)
+			}
+			filename = strings.Join(name, "/")
+		} else if inter, ok := file["path"].([]interface{}); ok {
+			name := make([]string, len(inter))
+			for i, v := range inter {
+				name[i] = fmt.Sprint(v)
+			}
+			filename = strings.Join(name, "/")
+		}
+		if length, ok := file["length"].(int64); ok {
+			filelength = length
+			totalSize += filelength
+		}
+		t.files = append(t.files, &tfile{name: filename, length: filelength})
+	}
+
+	if files, ok := dict["files"].([]interface{}); ok {
+		for _, file := range files {
+			if f, ok := file.(map[string]interface{}); ok {
+				extractFiles(f)
+			}
+		}
+	}
+
+	if t.length == 0 {
+		t.length = totalSize
+	}
+	if len(t.files) == 0 {
+		t.files = append(t.files, &tfile{name: t.name, length: t.length})
+	}
+
+	return t, nil
+}
+
