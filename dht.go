@@ -1,3 +1,4 @@
+// dht.go
 package main
 
 import (
@@ -6,7 +7,9 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"sync"
 	"time"
@@ -19,7 +22,7 @@ type nodeID []byte
 type announcements struct {
 	mu    sync.Mutex
 	ll    *list.List
-	cache map[string]*list.Element // 用于快速查找
+	cache map[string]*list.Element
 	limit int
 	input chan struct{}
 }
@@ -38,7 +41,6 @@ func (a *announcements) put(ac *announcement) {
 		return
 	}
 
-	// 检查是否已存在
 	if _, exists := a.cache[ac.infohashHex]; exists {
 		return
 	}
@@ -68,15 +70,55 @@ type dht struct {
 	queryTypes     map[string]func(map[string]interface{}, net.UDPAddr)
 	secret         []byte
 
-	// 新增字段
 	findNodeChan   chan string
 	bootstrapNodes []*net.UDPAddr
-	knownNodes     map[string]*net.UDPAddr
-	queryQueue     *list.List
-	queryMutex     sync.Mutex
 
-	// 公告消费者控制
 	announceTicker *time.Ticker
+
+	knownNodes map[string]*nodeScore
+	nodesMutex sync.Mutex // <-- 为 knownNodes 添加专用的互斥锁
+	// 用于处理查询请求的队列
+	queryQueue *list.List
+	queryMutex sync.Mutex
+	verbose    bool
+}
+
+type nodeScore struct {
+	addr     *net.UDPAddr
+	score    int
+	lastSeen time.Time
+}
+
+const (
+	LogLevelDebug = iota
+	LogLevelInfo
+	LogLevelWarn
+	LogLevelError
+)
+
+func logWithColor(level int, format string, args ...interface{}) {
+	var colorCode, prefix string
+
+	switch level {
+	case LogLevelDebug:
+		colorCode = "\033[36m"
+		prefix = "🐞 DEBUG"
+	case LogLevelInfo:
+		colorCode = "\033[32m"
+		prefix = "ℹ️ INFO"
+	case LogLevelWarn:
+		colorCode = "\033[33m"
+		prefix = "⚠️ WARN"
+	case LogLevelError:
+		colorCode = "\033[31m"
+		prefix = "❌ ERROR"
+	default:
+		colorCode = "\033[0m"
+		prefix = "💬 LOG"
+	}
+
+	msg := fmt.Sprintf(format, args...)
+	fmt.Printf("%s[%s] %s\033[0m\n", colorCode, prefix, msg)
 }
 
 func (d *dht) Close() {
@@ -91,9 +133,6 @@ func newDHT(laddr string, maxFriendsPerSec int) (*dht, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 在 newDHT 函数中添加
-	// conn.SetDeadline(time.Now().Add(10 * time.Second))
-	// _, err = conn.WriteToUDP([]byte("ping"), &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 12345})
 	d := &dht{
 		announcements: &announcements{
 			ll:    list.New(),
@@ -108,19 +147,13 @@ func newDHT(laddr string, maxFriendsPerSec int) (*dht, error) {
 		secret:         randBytes(20),
 		findNodeChan:   make(chan string, 100),
 		bootstrapNodes: []*net.UDPAddr{
-			// BitTorrent Mainline DHT nodes
 			{IP: net.ParseIP("router.bittorrent.com"), Port: 6881},
 			{IP: net.ParseIP("dht.transmissionbt.com"), Port: 6881},
 			{IP: net.ParseIP("router.utorrent.com"), Port: 6881},
 			{IP: net.ParseIP("dht.libtorrent.org"), Port: 25401},
 			{IP: net.ParseIP("dht.aelitis.com"), Port: 6881},
 			{IP: net.ParseIP("dht.vuze.com"), Port: 6881},
-
-			// Other known public nodes
 			{IP: net.ParseIP("router.bitcomet.com"), Port: 6881},
-			{IP: net.ParseIP("bootstrap.jami.net"), Port: 4222},
-
-			// IPV4
 			{IP: net.ParseIP("82.221.103.244"), Port: 6881},
 			{IP: net.ParseIP("87.121.121.2"), Port: 6881},
 			{IP: net.ParseIP("87.248.163.48"), Port: 6881},
@@ -128,19 +161,14 @@ func newDHT(laddr string, maxFriendsPerSec int) (*dht, error) {
 			{IP: net.ParseIP("200.223.19.6"), Port: 6881},
 			{IP: net.ParseIP("200.223.19.7"), Port: 6881},
 			{IP: net.ParseIP("212.129.33.250"), Port: 6881},
-
-			// IPV6
-			{IP: net.ParseIP("[2001:470:8c3a::346]"), Port: 6881},
-			{IP: net.ParseIP("[2a02:2268:2001:1:1:1:1:1]"), Port: 6881},
-
-			// 新增活跃节点
-			{IP: net.ParseIP("67.215.246.10"), Port: 6881},   // router.bittorrent.com
-			{IP: net.ParseIP("82.221.103.244"), Port: 6881},  // 可靠节点
-			{IP: net.ParseIP("104.238.198.186"), Port: 6881}, // 新增节点
+			{IP: net.ParseIP("67.215.246.10"), Port: 6881},
+			{IP: net.ParseIP("104.238.198.186"), Port: 6881},
 		},
-		knownNodes:     make(map[string]*net.UDPAddr),
+
+		knownNodes:     make(map[string]*nodeScore),
 		queryQueue:     list.New(),
 		announceTicker: time.NewTicker(100 * time.Millisecond),
+		verbose:        true,
 	}
 
 	d.queryTypes = map[string]func(map[string]interface{}, net.UDPAddr){
@@ -154,13 +182,13 @@ func newDHT(laddr string, maxFriendsPerSec int) (*dht, error) {
 }
 
 func (d *dht) run() {
-	log.Println("🚀 DHT网络启动中...")
 	go d.listen()
 	go d.discoverNodes()
 	go d.processQueries()
 	go d.consumeAnnouncements()
+	go d.queryRandomInfohashes()
+	go d.cleanInactiveNodes()
 
-	// 添加状态日志
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -177,49 +205,45 @@ func (d *dht) run() {
 	}()
 }
 
-// 消费公告，控制速率
 func (d *dht) consumeAnnouncements() {
-    log.Println("⏳ 启动公告消费者")
-    for {
-        select {
-        case <-d.die:
-            return
-        case <-d.announceTicker.C:
-            d.announcements.mu.Lock()
-            if d.announcements.ll.Len() > 0 {
-                elem := d.announcements.ll.Front()
-                ac := elem.Value.(*announcement)
-                d.announcements.ll.Remove(elem)
-                delete(d.announcements.cache, ac.infohashHex)
-                
-                // 添加详细日志
-                log.Printf("📨 发送公告: %s... (来源: %s)", 
-                    ac.infohashHex[:8], ac.from.String())
+	log.Println("⏳ 启动公告消费者")
+	for {
+		select {
+		case <-d.die:
+			return
+		case <-d.announceTicker.C:
+			d.announcements.mu.Lock()
+			if d.announcements.ll.Len() > 0 {
+				elem := d.announcements.ll.Front()
+				ac := elem.Value.(*announcement)
+				d.announcements.ll.Remove(elem)
+				delete(d.announcements.cache, ac.infohashHex)
 
-                select {
-                case d.chAnnouncement <- ac:
-                    // 成功发送
-                default:
-                    log.Println("⚠️ 公告通道已满，丢弃公告")
-                }
-            }
-            d.announcements.mu.Unlock()
-        }
-    }
+				log.Printf("📨 发送公告: %s... (来源: %s)",
+					ac.infohashHex[:8], ac.from.String())
+
+				select {
+				case d.chAnnouncement <- ac:
+				default:
+					log.Println("⚠️ 公告通道已满，丢弃公告")
+				}
+			}
+			d.announcements.mu.Unlock()
+		}
+	}
 }
 
 func (d *dht) listen() {
-    buf := make([]byte, 65535)
-    for {
-        n, addr, err := d.conn.ReadFromUDP(buf)
-        if err != nil {
-            log.Printf("UDP读取错误: %v", err)
-            continue
-        }
-        
-        // log.Printf("收到 %d 字节 UDP 数据包 (来源: %s)", n, addr.String())
-        d.onMessage(buf[:n], *addr)
-    }
+	buf := make([]byte, 65535)
+	for {
+		n, addr, err := d.conn.ReadFromUDP(buf)
+		if err != nil {
+			log.Printf("UDP读取错误: %v", err)
+			continue
+		}
+
+		d.onMessage(buf[:n], *addr)
+	}
 }
 
 func (d *dht) onMessage(data []byte, from net.UDPAddr) {
@@ -235,61 +259,53 @@ func (d *dht) onMessage(data []byte, from net.UDPAddr) {
 
 	switch y {
 	case "q":
-		log.Println("收到查询请求", from, dict["q"])
-		d.onQuery(dict, from)
-	case "r": 
-		// 添加响应处理
-		// log.Println("收到响应", from, dict["t"])
+		if dict["q"] != "find_node" {
+			logWithColor(LogLevelDebug, "收到查询请求 %s %s", from, dict["q"])
+			d.onQuery(dict, from)
+		}
+	case "r":
 		d.onResponse(dict, from)
 	}
 }
 
 func (d *dht) onResponse(dict map[string]interface{}, from net.UDPAddr) {
-    r, ok := dict["r"].(map[string]interface{})
-    if !ok {
-        return
-    }
+	r, ok := dict["r"].(map[string]interface{})
+	if !ok {
+		return
+	}
 
-    // 处理所有可能的响应类型
-    if _, ok := r["nodes"]; ok {
-        // log.Println("处理 find_node 响应", from)
-        d.onFindNodeResponse(dict, from)
-    } else if _, ok := r["token"]; ok {
-        log.Println("处理 get_peers 响应", from)
+	if _, ok := r["nodes"]; ok {
+		d.onFindNodeResponse(dict, from)
+	} else if _, ok := r["token"]; ok {
+		log.Printf("处理 get_peers 响应 %s", from)
 		d.onGetPeersResponse(dict, from)
-        // 这里可以添加更多处理逻辑
-    } else if _, ok := r["id"]; ok {
-        log.Println("处理 ping 响应", from)
-    }
+	} else if _, ok := r["id"]; ok {
+		log.Printf("处理 ping 响应 %s", from)
+	}
 }
 
-// 新增函数：处理 get_peers 响应
 func (d *dht) onGetPeersResponse(dict map[string]interface{}, from net.UDPAddr) {
-    r := dict["r"].(map[string]interface{})
-    t, _ := dict["t"].(string)
-    log.Printf("收到 get_peers 响应: 事务ID=%s 来源=%s", t[:min(4, len(t))], from.String())
-    
-    // 1. 如果有 values 字段，表示包含 peer 列表
-    if values, ok := r["values"].([]interface{}); ok {
-        for _, v := range values {
-            if peer, ok := v.(string); ok && len(peer) == 6 {
-                ip := net.IP(peer[:4])
-                port := binary.BigEndian.Uint16([]byte(peer[4:6]))
-                log.Printf("发现 peer: %s:%d (来自 %s)", ip, port, from.String())
-            }
-        }
-    }
-    
-    // 2. 如果有 nodes 字段，处理节点信息（与 find_node 响应相同）
-    if nodes, ok := r["nodes"].(string); ok && len(nodes) > 0 {
-        d.onFindNodeResponse(dict, from) // 复用现有函数
-    }
-    
-    // 3. 记录 token（虽然爬虫不需要）
-    if _, ok := r["token"].(string); ok {
+	r := dict["r"].(map[string]interface{})
+	t, _ := dict["t"].(string)
+	log.Printf("收到 get_peers 响应: 事务ID=%s 来源=%s", t[:min(4, len(t))], from.String())
+
+	if values, ok := r["values"].([]interface{}); ok {
+		for _, v := range values {
+			if peer, ok := v.(string); ok && len(peer) == 6 {
+				ip := net.IP(peer[:4])
+				port := binary.BigEndian.Uint16([]byte(peer[4:6]))
+				logWithColor(LogLevelInfo, "发现 peer: %s:%d (来自 %s)", ip, port, from.String())
+			}
+		}
+	}
+
+	if nodes, ok := r["nodes"].(string); ok && len(nodes) > 0 {
+		d.onFindNodeResponse(dict, from)
+	}
+
+	if _, ok := r["token"].(string); ok {
 		log.Println("收到 token，用于后续 announce_peer")
-        // 保存 token 可用于后续 announce_peer（爬虫不需要）
-    }
+	}
 }
 
 func (d *dht) onQuery(dict map[string]interface{}, from net.UDPAddr) {
@@ -319,7 +335,6 @@ func (d *dht) onAnnouncePeerQuery(dict map[string]interface{}, from net.UDPAddr)
 		return
 	}
 
-	// 发送回复
 	r := map[string]interface{}{
 		"id": string(d.localID),
 	}
@@ -334,20 +349,113 @@ func (d *dht) onAnnouncePeerQuery(dict map[string]interface{}, from net.UDPAddr)
 		return
 	}
 
-	// 处理公告
 	if ac := d.summarize(dict, from); ac != nil {
-		log.Printf("收到公告: 来自 %s, Infohash: %s", from.String(), ac.infohashHex)
 		d.announcements.put(ac)
-		select {
-		case d.chAnnouncement <- ac:
-		default:
-		}
+
+		// 已经有consumeAnnouncements协程处理，这里不再需要直接发送
+		// select {
+		// case d.chAnnouncement <- ac:
+		// default:
+		// }
+
+		logWithColor(LogLevelInfo, "发现磁力链: %s (来源: %s)",
+			ac.infohashHex, from.String())
 	}
 }
 
 func (d *dht) send(dict map[string]interface{}, to net.UDPAddr) error {
-	_, err := d.conn.WriteToUDP(bencode.Encode(dict), &to)
+	encoded := bencode.Encode(dict)
+	_, err := d.conn.WriteToUDP(encoded, &to)
 	return err
+}
+
+func (d *dht) queryRandomInfohashes() {
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.die:
+			return
+		case <-ticker.C:
+			d.nodesMutex.Lock() // 加锁
+			if len(d.knownNodes) == 0 {
+				d.nodesMutex.Unlock() // 如果提前返回，需要先解锁
+				continue
+			}
+
+			var bestNode *net.UDPAddr
+			maxScore := -1
+			for _, ns := range d.knownNodes {
+				if ns.score > maxScore {
+					maxScore = ns.score
+					bestNode = ns.addr
+				}
+			}
+			d.nodesMutex.Unlock() // 解锁
+
+			if bestNode == nil {
+				continue
+			}
+
+			smartInfohash := d.generateSmartInfohash()
+			// infohashHex := hex.EncodeToString(smartInfohash)
+
+			if d.verbose {
+				// log.Printf("🌐 查询智能磁力链: %s... (节点: %s)",
+				// 	infohashHex[:8], bestNode.String())
+			}
+			d.getPeers(string(smartInfohash), *bestNode)
+		}
+	}
+}
+
+func (d *dht) generateSmartInfohash() []byte {
+	randVal := rand.Intn(100)
+	switch {
+	case randVal < 40:
+		return d.generateVideoInfohash()
+	case randVal < 70:
+		return d.generateGameInfohash()
+	case randVal < 90:
+		return d.generateImageInfohash()
+	default:
+		return randBytes(20)
+	}
+}
+
+func (d *dht) generateVideoInfohash() []byte {
+	videoPrefixes := [][]byte{
+		{0x12, 0x34, 0x56},
+		{0x78, 0x9a, 0xbc},
+		{0xde, 0xf0, 0x12},
+	}
+	return d.applyPrefix(videoPrefixes[rand.Intn(len(videoPrefixes))])
+}
+
+func (d *dht) generateGameInfohash() []byte {
+	gamePrefixes := [][]byte{
+		{0x45, 0x67, 0x89},
+		{0xab, 0xcd, 0xef},
+		{0x01, 0x23, 0x45},
+	}
+	return d.applyPrefix(gamePrefixes[rand.Intn(len(gamePrefixes))])
+}
+
+func (d *dht) generateImageInfohash() []byte {
+	imagePrefixes := [][]byte{
+		{0x67, 0x89, 0xab},
+		{0xcd, 0xef, 0x01},
+		{0x23, 0x45, 0x67},
+	}
+	return d.applyPrefix(imagePrefixes[rand.Intn(len(imagePrefixes))])
+}
+
+func (d *dht) applyPrefix(prefix []byte) []byte {
+	result := make([]byte, 20)
+	copy(result, prefix)
+	rand.Read(result[len(prefix):])
+	return result
 }
 
 func (d *dht) makeToken(from net.UDPAddr) string {
@@ -362,31 +470,30 @@ func (d *dht) validateToken(token string, from net.UDPAddr) bool {
 }
 
 func (d *dht) summarize(dict map[string]interface{}, from net.UDPAddr) *announcement {
-    a, ok := dict["a"].(map[string]interface{})
-    if !ok {
-        log.Println("⚠️ 无效公告: 缺少 'a' 字段")
-        return nil
-    }
+	a, ok := dict["a"].(map[string]interface{})
+	if !ok {
+		log.Println("⚠️ 无效公告: 缺少 'a' 字段")
+		return nil
+	}
 
-    infohash, ok := a["info_hash"].(string)
-    if !ok {
-        log.Println("⚠️ 无效公告: 缺少 'info_hash' 字段")
-        return nil
-    }
-    
-    if len(infohash) != 20 {
-        log.Printf("⚠️ 无效公告: info_hash 长度错误 (%d != 20)", len(infohash))
-        return nil
-    }
+	infohash, ok := a["info_hash"].(string)
+	if !ok {
+		log.Println("⚠️ 无效公告: 缺少 'info_hash' 字段")
+		return nil
+	}
 
-    return &announcement{
-        from:        from,
-        infohash:    []byte(infohash),
-        infohashHex: hex.EncodeToString([]byte(infohash)),
-    }
+	if len(infohash) != 20 {
+		log.Printf("⚠️ 无效公告: info_hash 长度错误 (%d != 20)", len(infohash))
+		return nil
+	}
+
+	return &announcement{
+		from:        from,
+		infohash:    []byte(infohash),
+		infohashHex: hex.EncodeToString([]byte(infohash)),
+	}
 }
 
-// 发送 find_node 请求
 func (d *dht) findNode(target string, to net.UDPAddr) {
 	tid := randBytes(2)
 	query := map[string]interface{}{
@@ -398,61 +505,51 @@ func (d *dht) findNode(target string, to net.UDPAddr) {
 			"target": target,
 		},
 	}
+	// log.Printf("🌐 发送 find_node 到 %s, 目标: %s...", to.String(), hex.EncodeToString([]byte(target))[:8])
 	d.send(query, to)
 }
 
-// 处理 find_node 响应
-func (d *dht) onFindNodeResponse(dict map[string]interface{}, _ net.UDPAddr) {
-    r, ok := dict["r"].(map[string]interface{})
-    if !ok {
-        log.Println("⚠️ 无效的find_node响应: 缺少 'r' 字段")
-        return
-    }
-
-    nodes, ok := r["nodes"].(string)
-    if !ok {
-        log.Println("⚠️ 无效的find_node响应: 缺少 'nodes' 字段")
-        return
-    }
-
-    // 详细日志输出
-    // log.Printf("收到节点数据: 长度=%d, 内容=%x", len(nodes), nodes[:min(50, len(nodes))])
-    
-    if len(nodes)%26 != 0 {
-        log.Printf("⚠️ 无效节点数据长度: %d (应为26的倍数)", len(nodes))
-        return
-    }
-
-    for i := 0; i < len(nodes); i += 26 {
-        if i+26 > len(nodes) {
-            break
-        }
-        
-        nodeData := nodes[i : i+26]
-        id := nodeData[:20]
-        ip := net.IP(nodeData[20:24])
-        port := binary.BigEndian.Uint16([]byte(nodeData[24:26]))
-        addr := &net.UDPAddr{IP: ip, Port: int(port)}
-        
-        d.knownNodes[string(id)] = addr
-        // log.Printf("➕ 添加新节点: %s:%d (ID: %x)", ip, port, id)
-    }
-}
-
-func min(a, b int) int {
-    if a < b {
-        return a
-    }
-    return b
-}
-
-func (d *dht) discoverNodes() {
-	// 首先连接引导节点
-	for _, addr := range d.bootstrapNodes {
-		d.findNode(string(d.localID), *addr)
+func (d *dht) onFindNodeResponse(dict map[string]interface{}, from net.UDPAddr) {
+	r, ok := dict["r"].(map[string]interface{})
+	if !ok {
+		return
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	nodes, ok := r["nodes"].(string)
+	if !ok || len(nodes)%26 != 0 {
+		return
+	}
+
+	// log.Printf("✅ 收到来自 %s 的 find_node 响应，发现新节点", from.String())
+
+	d.nodesMutex.Lock()         // 加锁
+	defer d.nodesMutex.Unlock() // 推荐使用 defer 来确保解锁
+
+	for i := 0; i < len(nodes); i += 26 {
+		nodeData := nodes[i : i+26]
+		id := nodeData[:20]
+		ip := net.IP(nodeData[20:24])
+		port := binary.BigEndian.Uint16([]byte(nodeData[24:26]))
+		addr := &net.UDPAddr{IP: ip, Port: int(port)}
+
+		if ns, exists := d.knownNodes[string(id)]; exists {
+			ns.lastSeen = time.Now()
+			ns.score = min(ns.score+1, 10)
+		} else {
+			d.knownNodes[string(id)] = &nodeScore{
+				addr:     addr,
+				score:    3,
+				lastSeen: time.Now(),
+			}
+			if d.verbose {
+				// log.Printf("➕ 发现新节点: %s (初始评分:3)", addr.String())
+			}
+		}
+	}
+}
+
+func (d *dht) cleanInactiveNodes() {
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -460,53 +557,97 @@ func (d *dht) discoverNodes() {
 		case <-d.die:
 			return
 		case <-ticker.C:
-			// 定期查找新节点
-			log.Println("正在查找新节点...")
-			if len(d.knownNodes) > 0 {
-				// 随机选择一个已知节点
-				var randomAddr *net.UDPAddr
-				for _, addr := range d.knownNodes {
-					randomAddr = addr
-					break
+			d.nodesMutex.Lock() // 使用新的互斥锁
+			count := 0
+			now := time.Now()
+			for id, ns := range d.knownNodes {
+				if now.Sub(ns.lastSeen) > 15*time.Minute {
+					delete(d.knownNodes, id)
+					count++
 				}
-
-				// 查找随机目标
-				target := randBytes(20)
-				d.findNode(string(target), *randomAddr)
-
-				// 查找热门磁力链 ? 添加这行调用
-				d.getPeersForPopularTorrents(*randomAddr)
 			}
-		case target := <-d.findNodeChan:
-			// 查找特定目标
-			if len(d.knownNodes) > 0 {
-				var randomAddr *net.UDPAddr
-				for _, addr := range d.knownNodes {
-					randomAddr = addr
-					break
-				}
-				d.findNode(target, *randomAddr)
+			nodesCount := len(d.knownNodes)
+			d.nodesMutex.Unlock() // 在打印日志前解锁
+
+			if count > 0 && d.verbose {
+				log.Printf("🧹 清理 %d 个不活跃节点，当前节点数: %d",
+					count, nodesCount)
 			}
 		}
 	}
 }
 
-// 添加这个方法：查询热门磁力链
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (d *dht) discoverNodes() {
+	// 启动时立即发送
+	for _, addr := range d.bootstrapNodes {
+		d.findNode(string(d.localID), *addr)
+	}
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.die:
+			return
+		case <-ticker.C:
+			d.nodesMutex.Lock() // 加锁
+			// 如果没有已知节点，则每隔3秒向所有 bootstrap 节点重新发送查询
+			if len(d.knownNodes) == 0 {
+				d.nodesMutex.Unlock() // 解锁
+				log.Println("🚨 没有已知节点，重新向所有 bootstrap 节点发送查询")
+				for _, addr := range d.bootstrapNodes {
+					d.findNode(string(d.localID), *addr)
+				}
+				continue
+			}
+
+			// 如果有已知节点，则向一个随机或高分节点发送查询
+			var activeNode *net.UDPAddr
+			var nodeIDs []string
+			for id := range d.knownNodes {
+				nodeIDs = append(nodeIDs, id)
+			}
+			if len(nodeIDs) > 0 {
+				randomID := nodeIDs[rand.Intn(len(nodeIDs))]
+				activeNode = d.knownNodes[randomID].addr
+			}
+			d.nodesMutex.Unlock() // 解锁
+
+			if activeNode != nil {
+				target := d.generateSmartInfohash()
+				d.findNode(string(target), *activeNode)
+				d.getPeersForPopularTorrents(*activeNode)
+			}
+		}
+	}
+}
+
 func (d *dht) getPeersForPopularTorrents(to net.UDPAddr) {
 	popularHashes := []string{
-		"e2467cbf021192c241367b892230dc1e05c0580e", // Ubuntu
-		"5a8062c076fa85e8056456929059040c2a1e4c5d", // Fedora
-		"2081d049de3abf95b2338d4c2d0f6150e87e9d1e", // Debian
-		"a88fda5954e89178c372716a6a78b8180ef4c1d3", // The Matrix
-		"6a9759bffd5c0af65319979fb7832189f4f3c35d", // Inception
+		"e2467cbf021192c241367b892230dc1e05c0580e",
+		"5a8062c076fa85e8056456929059040c2a1e4c5d",
+		"2081d049de3abf95b2338d4c2d0f6150e87e9d1e",
+		"a88fda5954e89178c372716a6a78b8180ef4c1d3",
+		"6a9759bffd5c0af65319979fb7832189f4f3c35d",
 	}
 
 	for _, hash := range popularHashes {
+		// 为了避免过多的日志，这里只在verbose模式下打印
+		if d.verbose {
+			// log.Printf("🔍 查询流行磁力链: %s... (节点: %s)", hash[:8], to.String())
+		}
 		d.getPeers(hash, to)
 	}
 }
 
-// 发送 get_peers 请求 (用于查找磁力链)
 func (d *dht) getPeers(infohash string, to net.UDPAddr) {
 	tid := randBytes(2)
 	query := map[string]interface{}{
@@ -518,13 +659,11 @@ func (d *dht) getPeers(infohash string, to net.UDPAddr) {
 			"info_hash": infohash,
 		},
 	}
-	// log.Println(to.IP.String(), to.Port, "查询磁力链:", infohash)
 	d.send(query, to)
 }
 
-// 查询处理器
 func (d *dht) processQueries() {
-	ticker := time.NewTicker(2 * time.Second) // 控制查询频率
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -535,12 +674,18 @@ func (d *dht) processQueries() {
 			if hash, ok := d.dequeueQuery(); ok {
 				if len(d.knownNodes) > 0 {
 					var randomAddr *net.UDPAddr
-					for _, addr := range d.knownNodes {
-						randomAddr = addr
-						break
+					var nodeIDs []string
+					for id := range d.knownNodes {
+						nodeIDs = append(nodeIDs, id)
 					}
-					d.getPeers(hash, *randomAddr)
-					log.Printf("查询磁力链: %s", hash)
+					if len(nodeIDs) > 0 {
+						randomID := nodeIDs[rand.Intn(len(nodeIDs))]
+						randomAddr = d.knownNodes[randomID].addr
+					}
+					if randomAddr != nil {
+						d.getPeers(hash, *randomAddr)
+						log.Printf("🔍 查询磁力链: %s... (节点: %s)", hash[:8], randomAddr.String())
+					}
 				}
 			}
 		}
@@ -567,14 +712,12 @@ func (d *dht) dequeueQuery() (string, bool) {
 	return hash, true
 }
 
-// 处理ping查询
 func (d *dht) onPingQuery(dict map[string]interface{}, from net.UDPAddr) {
 	tid, ok := dict["t"].(string)
 	if !ok {
 		return
 	}
 
-	// 回复ping
 	reply := map[string]interface{}{
 		"t": tid,
 		"y": "r",
@@ -586,7 +729,6 @@ func (d *dht) onPingQuery(dict map[string]interface{}, from net.UDPAddr) {
 	log.Printf("🔄 响应ping请求: %s", from.String())
 }
 
-// 处理find_node查询
 func (d *dht) onFindNodeQuery(dict map[string]interface{}, from net.UDPAddr) {
 	tid, ok := dict["t"].(string)
 	if !ok {
@@ -603,7 +745,6 @@ func (d *dht) onFindNodeQuery(dict map[string]interface{}, from net.UDPAddr) {
 		return
 	}
 
-	// 回复find_node
 	reply := map[string]interface{}{
 		"t": tid,
 		"y": "r",
@@ -613,10 +754,9 @@ func (d *dht) onFindNodeQuery(dict map[string]interface{}, from net.UDPAddr) {
 		},
 	}
 	d.send(reply, from)
-	// log.Printf("🔍 响应find_node请求: %s", from.String())
+	log.Printf("📥 响应find_node请求: %s", from.String())
 }
 
-// 处理get_peers查询
 func (d *dht) onGetPeersQuery(dict map[string]interface{}, from net.UDPAddr) {
 	tid, ok := dict["t"].(string)
 	if !ok {
@@ -633,7 +773,6 @@ func (d *dht) onGetPeersQuery(dict map[string]interface{}, from net.UDPAddr) {
 		return
 	}
 
-	// 生成token
 	token := d.makeToken(from)
 	reply := map[string]interface{}{
 		"t": tid,

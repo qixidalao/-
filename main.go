@@ -14,6 +14,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+type CrawlerStatus struct {
+	StartTime   time.Time
+	MagnetCount int
+	LastLogTime time.Time
+	VideoCount  int
+	GameCount   int
+	ImageCount  int
+	OtherCount  int
+}
+
+type torsniff struct {
+	laddr      string
+	maxFriends int
+	dir        string
+	verbose    bool
+}
+
 func main() {
 	log.SetFlags(0)
 
@@ -45,12 +62,12 @@ func main() {
 		}
 
 		log.SetOutput(os.Stdout)
-		log.Printf("=== torsniff 启动 ===")
-		log.Printf("监听地址: %s:%d", addr, port)
-		log.Printf("最大节点数: %d", friends)
-		log.Printf("存储目录: %s", absDir)
-		log.Printf("详细日志: %t", verbose)
-		log.Println("====================")
+		logWithColor(LogLevelInfo, "=== torsniff 启动 ===")
+		logWithColor(LogLevelInfo, "监听地址: %s:%d", addr, port)
+		logWithColor(LogLevelInfo, "最大节点数: %d", friends)
+		logWithColor(LogLevelInfo, "存储目录: %s", absDir)
+		logWithColor(LogLevelInfo, "详细日志: %t", verbose)
+		logWithColor(LogLevelInfo, "====================")
 
 		p := &torsniff{
 			laddr:      net.JoinHostPort(addr, strconv.Itoa(int(port))),
@@ -73,100 +90,128 @@ func main() {
 	}
 }
 
-type CrawlerStatus struct {
-	StartTime   time.Time
-	MagnetCount int
-	LastLogTime time.Time
-}
-
-type torsniff struct {
-	laddr      string
-	maxFriends int
-	dir        string
-	verbose    bool
-}
-
 func (p *torsniff) run() error {
-	log.Println("🌱 正在初始化爬虫...")
-	
-	// 初始化存储
+	logWithColor(LogLevelInfo, "🌱 正在初始化爬虫...")
+
 	store := NewJsonStore(p.dir)
 	if store == nil {
 		log.Fatal("❌ 无法初始化磁力链存储")
 	}
-	log.Println("💾 磁力链存储初始化完成")
+	logWithColor(LogLevelInfo, "💾 磁力链存储初始化完成")
 
-	// 初始化DHT网络
 	dht, err := newDHT(p.laddr, p.maxFriends)
 	if err != nil {
 		log.Fatalf("❌ DHT初始化失败: %v", err)
 	}
 	defer dht.Close()
-	log.Println("🌐 DHT网络初始化完成")
+	logWithColor(LogLevelInfo, "🌐 DHT网络初始化完成")
 
-	// 启动DHT
 	go dht.run()
-	log.Println("🚀 DHT网络已启动")
+	logWithColor(LogLevelInfo, "🚀 DHT网络已启动")
 
-	// 创建状态记录器
 	status := &CrawlerStatus{
 		StartTime:   time.Now(),
-		MagnetCount: 0,
 		LastLogTime: time.Now(),
 	}
 
-	log.Println("====================================")
-	log.Println("🏁 磁力链爬虫已启动，开始爬取数据...")
-	log.Println("====================================")
+	logWithColor(LogLevelInfo, "====================================")
+	logWithColor(LogLevelInfo, "🏁 磁力链爬虫已启动，开始爬取数据...")
+	logWithColor(LogLevelInfo, "====================================")
 
-	// 主循环
 	for {
 		select {
 		case <-dht.die:
-			log.Printf("⚠️ DHT网络异常终止: %v", dht.errDie)
+			logWithColor(LogLevelError, "⚠️ DHT网络异常终止: %v", dht.errDie)
 			return dht.errDie
-			
+
 		case announce := <-dht.chAnnouncement:
 			infohash := announce.infohashHex
-			
-			// 跳过重复项
+
 			if store.Exists(infohash) {
 				if p.verbose {
 					log.Printf("⏭️ 跳过重复磁力链: %s...", infohash[:8])
 				}
 				continue
 			}
-			
-			// 创建磁力链
+
 			magnet := &MagnetLink{
-				Infohash:  infohash,
-				Magnet:    buildMagnetLink(infohash),
+				Infohash:   infohash,
+				Magnet:     buildMagnetLink(infohash),
 				Discovered: time.Now(),
 			}
-			
-			// 保存磁力链
+
 			if err := store.SaveMagnet(magnet); err != nil {
 				log.Printf("❌ 保存磁力链失败: %v", err)
 			} else {
 				status.MagnetCount++
-				log.Printf("✅ 发现新磁力链 [%04d]: magnet:?xt=urn:btih:%s", 
+				logWithColor(LogLevelWarn, "✅ 发现新磁力链 [%04d]: magnet:?xt=urn:btih:%s",
 					status.MagnetCount, infohash)
 			}
-			
-			// 加入查询队列
+
 			dht.enqueueQuery(infohash)
-			
+
+			category := classifyInfohash(infohash)
+			status.addMagnet(category)
+
+			logWithColor(LogLevelInfo, "发现%s磁力链 [%04d]: %s",
+				getCategoryName(category), status.MagnetCount, infohash)
+
 		case <-time.After(30 * time.Second):
-			// 每分钟打印状态
 			if time.Since(status.LastLogTime) > time.Minute {
 				duration := time.Since(status.StartTime)
-				log.Printf("📊 状态统计: 运行 %s | 发现 %d 个磁力链 | 节点数 %d | 队列 %d",
-					formatDuration(duration), 
+				dht.nodesMutex.Lock() // 在访问 dht.knownNodes 前加锁
+				nodesCount := len(dht.knownNodes)
+				dht.nodesMutex.Unlock() // 访问结束后解锁
+
+				logWithColor(LogLevelInfo, "📊 状态统计: 运行 %s | 发现 %d 个磁力链 | 节点数 %d | 队列 %d",
+					formatDuration(duration),
 					status.MagnetCount,
-					len(dht.knownNodes),
+					nodesCount, // 使用本地变量
 					dht.queryQueue.Len())
+				logWithColor(LogLevelInfo, "分类统计: 视频=%d, 游戏=%d, 图片/软件=%d, 其他=%d",
+					status.VideoCount, status.GameCount, status.ImageCount, status.OtherCount)
 				status.LastLogTime = time.Now()
 			}
+
 		}
+	}
+}
+
+func classifyInfohash(infohash string) string {
+	switch {
+	case isVideoContent(infohash):
+		return "video"
+	case isGameContent(infohash):
+		return "game"
+	case isImageContent(infohash):
+		return "image"
+	default:
+		return "other"
+	}
+}
+
+func getCategoryName(category string) string {
+	switch category {
+	case "video":
+		return "视频"
+	case "game":
+		return "游戏"
+	case "image":
+		return "图片/软件"
+	default:
+		return ""
+	}
+}
+
+func (s *CrawlerStatus) addMagnet(category string) {
+	switch category {
+	case "video":
+		s.VideoCount++
+	case "game":
+		s.GameCount++
+	case "image":
+		s.ImageCount++
+	default:
+		s.OtherCount++
 	}
 }

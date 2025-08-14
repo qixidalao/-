@@ -1,0 +1,27 @@
+[
+  {
+    "discovered": "2025-08-14T14:56:35+08:00",
+    "infohash": "2d913508d48d8e046942786b8712aa95d4a87a3c",
+    "magnet": "magnet:?xt=urn:btih:2d913508d48d8e046942786b8712aa95d4a87a3c\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
+  },
+  {
+    "discovered": "2025-08-14T21:55:07+08:00",
+    "infohash": "693b47c595e09f75dae3646b0537f38c5e354723",
+    "magnet": "magnet:?xt=urn:btih:693b47c595e09f75dae3646b0537f38c5e354723\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
+  },
+  {
+    "discovered": "2025-08-14T21:55:57+08:00",
+    "infohash": "7857e9dadf27987ff175a48e28f33aab901d736d",
+    "magnet": "magnet:?xt=urn:btih:7857e9dadf27987ff175a48e28f33aab901d736d\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
+  },
+  {
+    "discovered": "2025-08-14T21:56:18+08:00",
+    "infohash": "25907844ba4a68da306cb8709acc6b1d7964e6be",
+    "magnet": "magnet:?xt=urn:btih:25907844ba4a68da306cb8709acc6b1d7964e6be\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
+  },
+  {
+    "discovered": "2025-08-14T21:56:45+08:00",
+    "infohash": "5e013a8edc8f41da3d2bb0b8df3a6ef6ef337c35",
+    "magnet": "magnet:?xt=urn:btih:5e013a8edc8f41da3d2bb0b8df3a6ef6ef337c35\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
+  }
+]

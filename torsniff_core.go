@@ -16,7 +16,6 @@ func buildMagnetLink(infohash string) string {
 
 	magnet := fmt.Sprintf("magnet:?xt=urn:btih:%s", infohash)
 	
-	// 添加 tracker 参数
 	for _, tracker := range publicTrackers {
 		magnet += "&tr=" + tracker
 	}

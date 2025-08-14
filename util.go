@@ -16,7 +16,6 @@ func randBytes(n int) []byte {
 	return b
 }
 
-// 友好的时间格式化
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Second)
 	h := d / time.Hour

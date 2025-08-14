@@ -5,14 +5,12 @@ import (
 	"time"
 )
 
-// MagnetLink 定义磁力链接结构
 type MagnetLink struct {
-	Infohash  string    `json:"infohash"`
-	Magnet    string    `json:"magnet"`
+	Infohash   string    `json:"infohash"`
+	Magnet     string    `json:"magnet"`
 	Discovered time.Time `json:"discovered"`
 }
 
-// 添加 MarshalJSON 方法自定义时间格式
 func (m *MagnetLink) MarshalJSON() ([]byte, error) {
 	type Alias MagnetLink
 	return json.Marshal(&struct {
