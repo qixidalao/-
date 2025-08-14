@@ -206,7 +206,7 @@ func (d *dht) run() {
 }
 
 func (d *dht) consumeAnnouncements() {
-	log.Println("⏳ 启动公告消费者")
+	logWithColor(LogLevelInfo, "⏳ 启动公告消费者")
 	for {
 		select {
 		case <-d.die:
@@ -260,7 +260,7 @@ func (d *dht) onMessage(data []byte, from net.UDPAddr) {
 	switch y {
 	case "q":
 		if dict["q"] != "find_node" {
-			logWithColor(LogLevelDebug, "收到查询请求 %s %s", from, dict["q"])
+			logWithColor(LogLevelInfo, "收到查询请求 %s %s", from, dict["q"])
 			d.onQuery(dict, from)
 		}
 	case "r":
@@ -277,17 +277,17 @@ func (d *dht) onResponse(dict map[string]interface{}, from net.UDPAddr) {
 	if _, ok := r["nodes"]; ok {
 		d.onFindNodeResponse(dict, from)
 	} else if _, ok := r["token"]; ok {
-		log.Printf("处理 get_peers 响应 %s", from)
+		logWithColor(LogLevelInfo, "处理 get_peers 响应 %s", from)
 		d.onGetPeersResponse(dict, from)
 	} else if _, ok := r["id"]; ok {
-		log.Printf("处理 ping 响应 %s", from)
+		logWithColor(LogLevelInfo, "处理 ping 响应 %s", from)
 	}
 }
 
 func (d *dht) onGetPeersResponse(dict map[string]interface{}, from net.UDPAddr) {
 	r := dict["r"].(map[string]interface{})
 	t, _ := dict["t"].(string)
-	log.Printf("收到 get_peers 响应: 事务ID=%s 来源=%s", t[:min(4, len(t))], from.String())
+	logWithColor(LogLevelInfo, "收到 get_peers 响应: 事务ID=%s 来源=%s", t[:min(4, len(t))], from.String())
 
 	if values, ok := r["values"].([]interface{}); ok {
 		for _, v := range values {
@@ -602,7 +602,7 @@ func (d *dht) discoverNodes() {
 			// 如果没有已知节点，则每隔3秒向所有 bootstrap 节点重新发送查询
 			if len(d.knownNodes) == 0 {
 				d.nodesMutex.Unlock() // 解锁
-				log.Println("🚨 没有已知节点，重新向所有 bootstrap 节点发送查询")
+				logWithColor(LogLevelDebug, "🚨 没有已知节点，重新向所有 bootstrap 节点发送查询")
 				for _, addr := range d.bootstrapNodes {
 					d.findNode(string(d.localID), *addr)
 				}
@@ -726,7 +726,7 @@ func (d *dht) onPingQuery(dict map[string]interface{}, from net.UDPAddr) {
 		},
 	}
 	d.send(reply, from)
-	log.Printf("🔄 响应ping请求: %s", from.String())
+	logWithColor(LogLevelWarn, "🔄 响应ping请求: %s", from.String())
 }
 
 func (d *dht) onFindNodeQuery(dict map[string]interface{}, from net.UDPAddr) {
@@ -754,7 +754,7 @@ func (d *dht) onFindNodeQuery(dict map[string]interface{}, from net.UDPAddr) {
 		},
 	}
 	d.send(reply, from)
-	log.Printf("📥 响应find_node请求: %s", from.String())
+	logWithColor(LogLevelWarn, "📥 响应find_node请求: %s", from.String())
 }
 
 func (d *dht) onGetPeersQuery(dict map[string]interface{}, from net.UDPAddr) {
@@ -784,5 +784,5 @@ func (d *dht) onGetPeersQuery(dict map[string]interface{}, from net.UDPAddr) {
 		},
 	}
 	d.send(reply, from)
-	log.Printf("📥 响应get_peers请求: %s (%s)", from.String(), infohash[:8])
+	logWithColor(LogLevelWarn, "📥 响应get_peers请求: %s (%s)", from.String(), infohash[:8])
 }

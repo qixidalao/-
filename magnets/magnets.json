@@ -23,5 +23,10 @@
     "discovered": "2025-08-14T21:56:45+08:00",
     "infohash": "5e013a8edc8f41da3d2bb0b8df3a6ef6ef337c35",
     "magnet": "magnet:?xt=urn:btih:5e013a8edc8f41da3d2bb0b8df3a6ef6ef337c35\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
+  },
+  {
+    "discovered": "2025-08-14T23:55:50+08:00",
+    "infohash": "42eb0cf28d9bc423b0d620e086e4eeadd07ccf36",
+    "magnet": "magnet:?xt=urn:btih:42eb0cf28d9bc423b0d620e086e4eeadd07ccf36\u0026tr=udp://tracker.openbittorrent.com:80\u0026tr=udp://tracker.publicbt.com:80\u0026tr=udp://tracker.istole.it:6969\u0026tr=udp://open.demonii.com:1337\u0026tr=udp://tracker.coppersurfer.tk:6969"
   }
 ]

@@ -93,21 +93,33 @@ func main() {
 func (p *torsniff) run() error {
 	logWithColor(LogLevelInfo, "🌱 正在初始化爬虫...")
 
+	// 1. 先定义 torrentsDir 目录
+	torrentsDir := path.Join(p.dir, "torrents")
+	if err := os.MkdirAll(torrentsDir, 0755); err != nil {
+		logWithColor(LogLevelError, "❌ 无法创建种子存储目录: %v", err)
+	}
+
+	// 2. 初始化 store
 	store := NewJsonStore(p.dir)
 	if store == nil {
-		log.Fatal("❌ 无法初始化磁力链存储")
+		logWithColor(LogLevelError, "❌ 无法初始化磁力链存储")
 	}
 	logWithColor(LogLevelInfo, "💾 磁力链存储初始化完成")
 
+	// 3. 初始化 DHT
 	dht, err := newDHT(p.laddr, p.maxFriends)
 	if err != nil {
-		log.Fatalf("❌ DHT初始化失败: %v", err)
+		logWithColor(LogLevelError, "❌ DHT初始化失败: %v", err)
 	}
 	defer dht.Close()
 	logWithColor(LogLevelInfo, "🌐 DHT网络初始化完成")
 
 	go dht.run()
 	logWithColor(LogLevelInfo, "🚀 DHT网络已启动")
+
+	// 4. 最后，在 store 和 torrentsDir 都准备好后，启动验证器
+	go p.runVerifier(store, torrentsDir) // <-- 此处调用，所有变量都已定义
+	logWithColor(LogLevelInfo, "🔍 磁力链验证器已启动")
 
 	status := &CrawlerStatus{
 		StartTime:   time.Now(),
@@ -118,6 +130,7 @@ func (p *torsniff) run() error {
 	logWithColor(LogLevelInfo, "🏁 磁力链爬虫已启动，开始爬取数据...")
 	logWithColor(LogLevelInfo, "====================================")
 
+	// 5. 启动 DHT 监听和处理循环
 	for {
 		select {
 		case <-dht.die:
@@ -174,6 +187,60 @@ func (p *torsniff) run() error {
 			}
 
 		}
+	}
+}
+
+// runVerifier 是周期性验证磁力链接的协程
+func (p *torsniff) runVerifier(store TorrentStore, torrentsDir string) {
+	logWithColor(LogLevelInfo, "🔍 验证器已启动，将周期性验证磁力链...")
+	// 每 15 分钟执行一次
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	// 首次启动时先执行一次
+	p.verifyMagnets(store, torrentsDir)
+
+	for {
+		select {
+		case <-ticker.C:
+			p.verifyMagnets(store, torrentsDir)
+		}
+	}
+}
+
+// verifyMagnets 是单次验证的逻辑
+func (p *torsniff) verifyMagnets(store TorrentStore, torrentsDir string) {
+	logWithColor(LogLevelInfo, "🔍 开始新一轮磁力链验证...")
+	allMagnets := store.GetAllMagnets()
+	if len(allMagnets) == 0 {
+		logWithColor(LogLevelWarn, "当前没有待验证的磁力链。")
+		return
+	}
+
+	var remainingMagnets []*MagnetLink
+	threeDaysAgo := time.Now().Add(-72 * time.Hour)
+
+	for _, magnet := range allMagnets {
+		// 尝试获取元数据
+		if FetchAndSaveMetadata(magnet.Infohash, torrentsDir) {
+			// 成功获取，该磁力链任务完成，不再保留在json中
+			continue
+		}
+
+		// 获取失败，检查是否过期
+		if magnet.Discovered.Before(threeDaysAgo) {
+			logWithColor(LogLevelWarn, "🗑️ 删除过期且无效的磁力链: %s", magnet.Infohash[:8])
+			// 过期了，不再保留
+			continue
+		}
+
+		// 获取失败但未过期，保留下来下次再试
+		remainingMagnets = append(remainingMagnets, magnet)
+	}
+
+	// 将过滤后的列表写回文件
+	if err := store.RewriteFile(remainingMagnets); err != nil {
+		logWithColor(LogLevelError, "❌ 更新磁力链文件失败: %v", err)
 	}
 }
 
